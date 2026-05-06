@@ -2,14 +2,15 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 from aqt import mw  # type: ignore
 from aqt.qt import (  # type: ignore
-    QDialog, QHBoxLayout, QKeySequence, QLabel, QLineEdit, QPushButton,
-    QShortcut, QSizePolicy, QVBoxLayout, Qt,
+    QAction, QDialog, QHBoxLayout, QKeySequence, QLabel, QLineEdit, QMenu,
+    QPushButton, QShortcut, QSizePolicy, QToolButton, QVBoxLayout, Qt,
 )
-from aqt.utils import showWarning  # type: ignore
+from aqt.utils import askUser, showWarning  # type: ignore
 
 from . import card_text, prompt
 from .client import ChatRequest
@@ -25,7 +26,6 @@ def _addon_dir() -> Path:
 
 def _config() -> dict:
     cfg = mw.addonManager.getConfig(__name__.split(".")[0]) or {}
-    # Fallback defaults if config missing
     return {
         "model": cfg.get("model", "openrouter/free"),
         "max_response_words": cfg.get("max_response_words", 80),
@@ -34,6 +34,13 @@ def _config() -> dict:
         "popup_width": cfg.get("popup_width", 480),
         "popup_height": cfg.get("popup_height", 640),
     }
+
+
+def _fmt_ts(ts: int) -> str:
+    try:
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return str(ts)
 
 
 class ExplainPopup(QDialog):
@@ -46,6 +53,8 @@ class ExplainPopup(QDialog):
         self._thread = None
         self._current_assistant_id: str | None = None
         self._current_assistant_buf: list[str] = []
+        # Active session: latest existing, or 1 if none yet.
+        self._session_id: int = self._store.latest_session_id(card.id)
 
         self.setWindowTitle("Explain")
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
@@ -58,6 +67,32 @@ class ExplainPopup(QDialog):
         self._front_label.setWordWrap(True)
         self._front_label.setStyleSheet("color: #aaa; font-size: 11px;")
         layout.addWidget(self._front_label)
+
+        # Session toolbar: New | History | Clear
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(4)
+        self._new_btn = QPushButton("New")
+        self._new_btn.setToolTip("Start a fresh explanation session for this card")
+        self._new_btn.clicked.connect(self._on_new_session)
+
+        self._history_btn = QToolButton()
+        self._history_btn.setText("History")
+        self._history_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._history_menu = QMenu(self._history_btn)
+        self._history_btn.setMenu(self._history_menu)
+
+        self._clear_btn = QPushButton("Clear")
+        self._clear_btn.setToolTip("Delete the current session")
+        self._clear_btn.clicked.connect(self._on_clear_session)
+
+        toolbar.addWidget(self._new_btn)
+        toolbar.addWidget(self._history_btn)
+        toolbar.addWidget(self._clear_btn)
+        toolbar.addStretch(1)
+        self._session_label = QLabel()
+        self._session_label.setStyleSheet("color: #888; font-size: 11px;")
+        toolbar.addWidget(self._session_label)
+        layout.addLayout(toolbar)
 
         self._chat = ChatWebView(self)
         self._chat.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -75,14 +110,15 @@ class ExplainPopup(QDialog):
 
         QShortcut(QKeySequence("Esc"), self, activated=self.close)
 
-        # Defer initial load until webview's HTML is ready
         self._chat.loadFinished.connect(self._on_webview_ready)
 
     def _on_webview_ready(self, ok: bool) -> None:
         if not ok:
             return
         self._chat.loadFinished.disconnect(self._on_webview_ready)
-        self._load_or_explain()
+        self._render_header()
+        self._refresh_history_menu()
+        self._render_session()
 
     def _deck_name(self) -> str:
         try:
@@ -90,27 +126,89 @@ class ExplainPopup(QDialog):
         except Exception:
             return ""
 
-    def _load_or_explain(self) -> None:
-        front, back = card_text.front_back(self._card)
+    def _render_header(self) -> None:
+        front, _back = card_text.front_back(self._card)
         deck = self._deck_name()
         preview = front[:120] + ("..." if len(front) > 120 else "")
         header = f"[{deck}] {preview}" if deck else f"Card: {preview}"
         self._front_label.setText(header)
 
-        history = self._store.history(self._card.id)
+    def _refresh_history_menu(self) -> None:
+        self._history_menu.clear()
+        sessions = self._store.list_sessions(self._card.id)
+        if not sessions:
+            no_act = QAction("(no past sessions)", self._history_menu)
+            no_act.setEnabled(False)
+            self._history_menu.addAction(no_act)
+            self._session_label.setText("session 1 (new)")
+            return
+
+        for sess in sessions:
+            preview = sess.first_user_preview or "(empty)"
+            label = f"#{sess.session_id}  {_fmt_ts(sess.started_at)}  {preview[:60]}"
+            action = QAction(label, self._history_menu)
+            if sess.session_id == self._session_id:
+                action.setText("● " + label)
+            action.triggered.connect(
+                lambda _checked=False, sid=sess.session_id: self._switch_to_session(sid)
+            )
+            self._history_menu.addAction(action)
+
+        total = len(sessions)
+        self._session_label.setText(f"session #{self._session_id} of {total}")
+
+    def _render_session(self) -> None:
+        """Load current session into the webview, or fire fresh explain if empty."""
+        front, back = card_text.front_back(self._card)
+        deck = self._deck_name()
+
+        # Reset the webview by reloading its HTML.
+        self._chat.reset()
+
+        history = self._store.history(self._card.id, session_id=self._session_id)
         if history:
             for t in history:
                 if t.role in ("user", "assistant"):
                     self._chat.add_message(t.role, t.content)
-            # If last turn was user (prior attempt failed mid-stream), re-fire.
             if history[-1].role == "user":
+                # Prior assistant call failed mid-stream — re-fire.
                 self._fire_completion()
             return
 
+        # Empty session: fire the auto-explain.
         first_msg = prompt.first_user_message(front, back, deck=deck)
         self._chat.add_message("user", first_msg)
-        self._store.append(self._card.id, "user", first_msg)
+        self._store.append(self._card.id, "user", first_msg, session_id=self._session_id)
         self._fire_completion()
+
+    def _switch_to_session(self, session_id: int) -> None:
+        if session_id == self._session_id:
+            return
+        self._session_id = session_id
+        self._refresh_history_menu()
+        self._render_session()
+
+    def _on_new_session(self) -> None:
+        self._session_id = self._store.new_session_id(self._card.id)
+        self._refresh_history_menu()
+        self._render_session()
+
+    def _on_clear_session(self) -> None:
+        if not askUser(
+            f"Delete session #{self._session_id} for this card?",
+            parent=self,
+            defaultno=True,
+        ):
+            return
+        self._store.clear_session(self._card.id, self._session_id)
+        # Switch to latest remaining session, or start fresh.
+        sessions = self._store.list_sessions(self._card.id)
+        if sessions:
+            self._session_id = sessions[0].session_id
+        else:
+            self._session_id = self._store.new_session_id(self._card.id)
+        self._refresh_history_menu()
+        self._render_session()
 
     def _on_send(self) -> None:
         text = self._input.text().strip()
@@ -118,7 +216,7 @@ class ExplainPopup(QDialog):
             return
         self._input.clear()
         self._chat.add_message("user", text)
-        self._store.append(self._card.id, "user", text)
+        self._store.append(self._card.id, "user", text, session_id=self._session_id)
         self._fire_completion()
 
     def _fire_completion(self) -> None:
@@ -129,13 +227,15 @@ class ExplainPopup(QDialog):
             return
         if not api_key:
             self._chat.show_error(
-                "API key not set. Tools → anki-explain → Set API Key."
+                "API key not set. Tools -> anki-explain -> Set API Key."
             )
             return
 
-        # Build full message list: system + persisted history
-        history = self._store.history(self._card.id)
-        messages = [{"role": "system", "content": prompt.system_prompt(self._cfg["max_response_words"])}]
+        history = self._store.history(self._card.id, session_id=self._session_id)
+        messages = [{
+            "role": "system",
+            "content": prompt.system_prompt(self._cfg["max_response_words"]),
+        }]
         for t in history:
             if t.role in ("user", "assistant"):
                 messages.append({"role": t.role, "content": t.content})
@@ -169,7 +269,10 @@ class ExplainPopup(QDialog):
     def _on_finished(self, _full: str) -> None:
         full = "".join(self._current_assistant_buf)
         if full:
-            self._store.append(self._card.id, "assistant", full)
+            self._store.append(
+                self._card.id, "assistant", full, session_id=self._session_id
+            )
+        self._refresh_history_menu()
         self._reset_input()
 
     def _on_failed(self, msg: str) -> None:

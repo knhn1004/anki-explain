@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import json
 
-from aqt.qt import QUrl, QWebEngineView  # type: ignore
+from aqt.qt import (  # type: ignore
+    QDesktopServices, QUrl, QWebEnginePage, QWebEngineView,
+)
 
 
 _HTML = """\
@@ -33,6 +35,15 @@ _HTML = """\
   code { font-family: ui-monospace, monospace; font-size: 13px; }
   .err { background: #5a2222; color: #ffd; }
   a { color: #6cb6ff; }
+  .thinking { display: inline-flex; gap: 4px; padding: 4px 0; }
+  .thinking span { width: 6px; height: 6px; border-radius: 50%;
+                   background: #888; animation: bounce 1.2s infinite ease-in-out; }
+  .thinking span:nth-child(2) { animation-delay: 0.15s; }
+  .thinking span:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes bounce {
+    0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+    30% { transform: translateY(-4px); opacity: 1; }
+  }
 </style></head>
 <body><div id='log'></div>
 <script>
@@ -76,12 +87,23 @@ function addMsg(role, text, msgId) {
 function startAssistant(msgId) {
   const body = buildMsg('assistant', msgId);
   body.dataset.raw = '';
+  // Show animated thinking dots until first chunk arrives.
+  const dots = document.createElement('div');
+  dots.className = 'thinking';
+  dots.dataset.role = 'thinking';
+  dots.appendChild(document.createElement('span'));
+  dots.appendChild(document.createElement('span'));
+  dots.appendChild(document.createElement('span'));
+  body.appendChild(dots);
   scrollBottom();
 }
 function appendChunk(msgId, chunk) {
   const div = document.getElementById(msgId);
   if (!div) return;
   const body = div.querySelector('.body');
+  // Strip the thinking indicator on first real content.
+  const dots = body.querySelector('[data-role="thinking"]');
+  if (dots) dots.remove();
   body.dataset.raw = (body.dataset.raw || '') + chunk;
   body.innerHTML = md(body.dataset.raw);
   scrollBottom();
@@ -99,10 +121,38 @@ function scrollBottom() { window.scrollTo(0, document.body.scrollHeight); }
 """
 
 
+class _ChatPage(QWebEnginePage):
+    """QWebEnginePage that opens external links in the system browser.
+
+    Without this, http(s) link clicks would either navigate the chat view
+    away from its HTML (replacing the UI) or, when target="_blank" is set,
+    silently drop because the default createWindow() returns nullptr.
+    """
+
+    def acceptNavigationRequest(self, url, nav_type, is_main_frame):  # type: ignore[override]
+        # Allow the initial setHtml() data: load and any same-doc anchors.
+        if url.scheme() in ("data", "about"):
+            return super().acceptNavigationRequest(url, nav_type, is_main_frame)
+        if url.scheme() in ("http", "https"):
+            QDesktopServices.openUrl(url)
+            return False
+        return super().acceptNavigationRequest(url, nav_type, is_main_frame)
+
+    def createWindow(self, _wtype):  # type: ignore[override]
+        # Route target="_blank" clicks through self.acceptNavigationRequest
+        # so they end up opened externally instead of being dropped.
+        return self
+
+
 class ChatWebView(QWebEngineView):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setPage(_ChatPage(self))
         self.setHtml(_HTML, QUrl("about:blank"))
+
+    def reset(self) -> None:
+        """Clear all rendered messages without reloading the page (synchronous)."""
+        self.page().runJavaScript("document.getElementById('log').innerHTML = '';")
 
     def add_message(self, role: str, text: str, msg_id: str | None = None) -> None:
         rid = json.dumps(msg_id) if msg_id else "null"

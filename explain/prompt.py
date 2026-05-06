@@ -6,7 +6,9 @@ def system_prompt(max_words: int = 80) -> str:
     return (
         "You explain Anki flashcards. Be SUCCINCT. "
         f"Hard cap: {max_words} words. No preamble, no padding. "
-        "Plain language. Cite web sources inline as [1], [2] when used."
+        "Plain language. When citing web sources, format as clickable markdown "
+        "links: [short label](https://full-url). Put a Sources line at the end "
+        "if any links used."
     )
 
 

@@ -10,3 +10,4 @@ user_files/*.sqlite-journal
 .DS_Store
 .vscode/
 .idea/
+graphify-out/
