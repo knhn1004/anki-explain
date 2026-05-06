@@ -1,0 +1,10 @@
+{
+  "package": "anki_explain",
+  "name": "anki-explain",
+  "conflicts": [],
+  "mod": 0,
+  "min_point_version": 230900,
+  "max_point_version": 0,
+  "human_version": "0.1.0",
+  "homepage": "https://github.com/oliver/anki-explain"
+}

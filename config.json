@@ -1,0 +1,9 @@
+{
+  "model": "openrouter/free",
+  "max_response_words": 80,
+  "shortcut": "Ctrl+Shift+E",
+  "web_search": false,
+  "web_search_max_results": 5,
+  "popup_width": 480,
+  "popup_height": 640
+}
