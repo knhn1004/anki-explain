@@ -29,3 +29,12 @@ install: build
 uninstall:
     rm -rf "{{ANKI_ADDONS}}/anki_explain"
     @echo "Removed from Anki."
+
+# Build a fresh AnkiWeb-ready zip (top-level files, no __pycache__).
+release: clean build
+    @echo ""
+    @echo "Built {{PKG}} for AnkiWeb."
+    @echo "Verify contents:"
+    @unzip -l {{PKG}}
+    @echo ""
+    @echo "Upload at: https://ankiweb.net/shared/addons/"

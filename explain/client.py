@@ -12,7 +12,7 @@ import urllib.error
 import urllib.request
 
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_HEADERS_REFERER = "https://github.com/oliver/anki-explain"
+DEFAULT_HEADERS_REFERER = "https://github.com/knhn1004/anki-explain"
 DEFAULT_HEADERS_TITLE = "anki-explain"
 
 
